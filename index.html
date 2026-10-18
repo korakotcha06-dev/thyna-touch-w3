@@ -226,6 +226,26 @@ select { font: inherit; font-size: .9rem; color: var(--fg); background: var(--pa
 .paper .recs p { margin: 0; display: grid; grid-template-columns: 64px 1fr; }
 .paper .tag { color: #667085; font-size: 12px; padding-top: 2px; }
 .paper footer { margin-top: 18px; padding-top: 10px; border-top: 1px solid #eaecf0; font-size: 11px; color: #667085; }
+.map-card { gap: 16px; }
+.map-head { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: start; justify-content: space-between; }
+.map-head .note { margin: 2px 0 0; }
+.map-body { display: grid; grid-template-columns: minmax(0, 480px) minmax(0, 1fr); gap: 24px; align-items: start; }
+.thmap { position: relative; max-width: 480px; width: 100%; }
+.thmap svg { display: block; width: 100%; height: auto; overflow: visible; }
+.callout { position: absolute; transform: translateY(-50%); background: var(--bg); border-radius: 10px; padding: 6px 10px;
+  display: grid; gap: 0; line-height: 1.3; box-sizing: border-box; pointer-events: none; }
+.callout span { font-size: .72rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.callout b { font-family: var(--font-display); font-weight: 500; font-size: .95rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rank-title { font-family: var(--font-display); font-weight: 500; font-size: .95rem; margin: 0 0 8px; }
+.rank { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.rank li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 2px 10px; align-items: baseline; }
+.rank .rk { color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.rank .rn { font-size: .92rem; display: grid; }
+.rank .rn small, .rank .rv small { color: var(--muted); font-size: .72rem; }
+.rank .rv { text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; display: grid; font-size: .92rem; }
+.rank .rbar { grid-column: 2 / -1; height: 6px; border-radius: 999px; background: color-mix(in srgb, var(--bar) 14%, transparent); overflow: hidden; }
+.rank .rbar i { display: block; height: 100%; background: var(--bar); border-radius: 999px; }
+@media (max-width: 820px) { .map-body { grid-template-columns: minmax(0, 1fr); } }
 .hidden-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 </style>
 
@@ -238,6 +258,7 @@ select { font: inherit; font-size: .9rem; color: var(--fg); background: var(--pa
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="thai-font.js"></script>
+<script src="thai-map.js"></script>
 <script>
 const { useState, useMemo, useRef, useEffect } = React;
 const html = htm.bind(React.createElement);
@@ -503,6 +524,140 @@ function CarrierStack({ data, cats }) {
         <span>${hover.carrier} · ${hover.cat}</span>${baht(hover.v, 0)} · ${hover.pct.toFixed(1)}%
       </div>`}
     </div>`;
+}
+
+// แผนที่จุด (dot matrix) ประเทศไทย: คำนวณตารางจุดจากรูปร่างจังหวัดใน thai-map.js แล้วระบายสีตามภูมิภาค
+let MAP_CACHE;
+function thaiMapGeometry() {
+  if (MAP_CACHE !== undefined) return MAP_CACHE;
+  const P = window.TH_PROVINCES || [];
+  if (!P.length) return (MAP_CACHE = null);
+  let minLon = 1e9, maxLon = -1e9, minLat = 1e9, maxLat = -1e9;
+  const prov = P.map((p) => {
+    let a = 1e9, b = -1e9, c = 1e9, d = -1e9;
+    for (const ring of p.r) for (const [x, y] of ring) { if (x < a) a = x; if (x > b) b = x; if (y < c) c = y; if (y > d) d = y; }
+    minLon = Math.min(minLon, a); maxLon = Math.max(maxLon, b); minLat = Math.min(minLat, c); maxLat = Math.max(maxLat, d);
+    return { name: p.n, rings: p.r, bbox: [a, b, c, d], dots: [], cx: (a + b) / 2, cy: (c + d) / 2 };
+  });
+  // กฎคู่-คี่ ครอบคลุมรูกลางพื้นที่ (เช่น จังหวัดที่ล้อมจังหวัดอื่น)
+  const inside = (x, y, rings) => {
+    let c = false;
+    for (const ring of rings) {
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const [xi, yi] = ring[i], [xj, yj] = ring[j];
+        if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
+      }
+    }
+    return c;
+  };
+  const step = 0.12;
+  for (let lat = Math.ceil(minLat / step) * step; lat <= maxLat; lat += step) {
+    for (let lon = Math.ceil(minLon / step) * step; lon <= maxLon; lon += step) {
+      for (const p of prov) {
+        const [a, b, c, d] = p.bbox;
+        if (lon < a || lon > b || lat < c || lat > d) continue;
+        if (inside(lon, lat, p.rings)) { p.dots.push([lon, lat]); break; }
+      }
+    }
+  }
+  for (const p of prov) {
+    if (p.dots.length) {
+      p.cx = p.dots.reduce((t, q) => t + q[0], 0) / p.dots.length;
+      p.cy = p.dots.reduce((t, q) => t + q[1], 0) / p.dots.length;
+    }
+  }
+  return (MAP_CACHE = { prov, minLon, maxLon, minLat, maxLat, step });
+}
+
+function ThaiMap({ provinces }) {
+  const geo = useMemo(thaiMapGeometry, []);
+  const [hover, setHover] = useState(null);
+  if (!geo) return null;
+
+  const H = 600, pad = 10, CALL = 150;
+  const cos = Math.cos(13 * Math.PI / 180);
+  const sc = (H - 2 * pad) / (geo.maxLat - geo.minLat);
+  const X = (lon) => (lon - geo.minLon) * cos * sc + pad;
+  const Y = (lat) => (geo.maxLat - lat) * sc + pad;
+  const mapW = (geo.maxLon - geo.minLon) * cos * sc + 2 * pad;
+  const VW = Math.round(mapW + CALL);
+  const dotW = geo.step * cos * sc * 0.7;
+
+  const byName = new Map(provinces.map((p) => [p.name, p]));
+  const max = Math.max(1, ...provinces.map((p) => p.net));
+  const total = provinces.reduce((t, p) => t + p.net, 0) || 1;
+  const placed = geo.prov.filter((p) => byName.has(p.name)).map((p) => {
+    const d = byName.get(p.name);
+    return { ...d, x: X(p.cx), y: Y(p.cy), r: 5 + 12 * Math.sqrt(d.net / max), color: regionColor(d.region) };
+  }).sort((a, b) => b.net - a.net);
+
+  // ป้ายบอกยอด 3 จังหวัดแรกที่อยู่ห่างกันพอ ไม่ให้ซ้อนกัน
+  const chosen = [];
+  for (const p of placed) {
+    if (chosen.length >= 3) break;
+    if (chosen.every((c) => Math.hypot(c.x - p.x, c.y - p.y) > 80)) chosen.push(p);
+  }
+  const callouts = chosen.map((p) => ({ ...p, cy2: p.y })).sort((a, b) => a.cy2 - b.cy2);
+  for (let i = 1; i < callouts.length; i++) if (callouts[i].cy2 - callouts[i - 1].cy2 < 58) callouts[i].cy2 = callouts[i - 1].cy2 + 58;
+  const callX = mapW + 6;
+
+  const show = (p) => setHover({ name: p.name, net: p.net, n: p.n, share: p.net / total * 100, x: p.x, y: p.y });
+  return html`<div class="thmap">
+    <svg viewBox=${`0 0 ${VW} ${H}`} role="img" aria-label="แผนที่ประเทศไทย ยอดขายสุทธิตามจังหวัด">
+      ${geo.prov.map((p) => {
+        const d = byName.get(p.name);
+        if (!p.dots.length) return null;
+        const path = p.dots.map(([lo, la]) => `M${X(lo).toFixed(1)},${Y(la).toFixed(1)}h0`).join('');
+        return html`<path key=${p.name} d=${path} fill="none" stroke-linecap="round" stroke-width=${dotW}
+          style=${d ? { stroke: regionColor(d.region), strokeOpacity: 0.42 } : { stroke: 'color-mix(in srgb, var(--muted) 30%, transparent)' }}
+          onMouseEnter=${d ? () => show({ ...d, x: X(p.cx), y: Y(p.cy) }) : undefined} onMouseLeave=${d ? () => setHover(null) : undefined} />`;
+      })}
+      ${callouts.map((c) => html`<line key=${'l' + c.name} x1=${c.x + c.r} y1=${c.y} x2=${callX - 2} y2=${c.cy2} stroke="var(--line)" stroke-width="1.5" />`)}
+      ${[...placed].reverse().map((p) => html`<g key=${p.name} onMouseEnter=${() => show(p)} onMouseLeave=${() => setHover(null)} style=${{ cursor: 'default' }}>
+        <circle cx=${p.x} cy=${p.y} r=${p.r + 4} fill=${p.color} fill-opacity="0.2" />
+        <circle cx=${p.x} cy=${p.y} r=${p.r} fill=${p.color} fill-opacity="0.9" stroke="var(--panel)" stroke-width="2" />
+      </g>`)}
+    </svg>
+    ${callouts.map((c) => html`<div class="callout" key=${c.name} style=${{ left: (callX / VW * 100) + '%', top: (c.cy2 / H * 100) + '%', width: ((CALL - 10) / VW * 100) + '%' }}>
+      <span>${c.name}</span><b>${baht(c.net, 0)}</b>
+    </div>`)}
+    ${hover && html`<div class="tip" style=${{ left: Math.min(hover.x / VW * 100, 55) + '%', top: (hover.y / H * 100) + '%', transform: 'translate(12px, -120%)' }}>
+      <span>${hover.name}</span>${baht(hover.net, 0)} · ${hover.share.toFixed(1)}% · ${int(hover.n)} คำสั่งซื้อ
+    </div>`}
+  </div>`;
+}
+
+function ProvinceMapCard({ regions }) {
+  const flat = regions.flatMap((r) => r.provinces.map((p) => ({ name: p.name, net: p.net, n: p.n, region: r.region })));
+  const ranked = [...flat].sort((a, b) => b.net - a.net);
+  const top = ranked.slice(0, 10), max = top.length ? top[0].net : 1;
+  const total = flat.reduce((t, p) => t + p.net, 0) || 1;
+  if (!flat.length) return null;
+  return html`<div class="card map-card">
+    <div class="map-head">
+      <div>
+        <h2>แผนที่ยอดขายสุทธิตามจังหวัด</h2>
+        <p class="note">ขนาดวงกลมตามยอดขายสุทธิ สีตามภูมิภาค ชี้ที่วงกลมเพื่อดูรายละเอียด</p>
+      </div>
+      <div class="legend">
+        ${regions.map((r) => html`<span key=${r.region}><i style=${{ background: regionColor(r.region) }}></i>${r.region}</span>`)}
+      </div>
+    </div>
+    <div class="map-body">
+      <${ThaiMap} provinces=${flat} />
+      <div>
+        <h3 class="rank-title">จังหวัดที่มียอดสูงสุด ${int(top.length)} อันดับ</h3>
+        <ol class="rank">
+          ${top.map((p, i) => html`<li key=${p.name} style=${{ '--bar': regionColor(p.region) }}>
+            <span class="rk">${i + 1}</span>
+            <span class="rn">${p.name}<small>${p.region}</small></span>
+            <span class="rv">${baht(p.net, 0)}<small>${(p.net / total * 100).toFixed(1)}%</small></span>
+            <span class="rbar"><i style=${{ width: (p.net / max * 100) + '%' }}></i></span>
+          </li>`)}
+        </ol>
+      </div>
+    </div>
+  </div>`;
 }
 
 function RegionCard({ r }) {
@@ -1251,6 +1406,7 @@ function App() {
         <h2>จังหวัดที่ขายได้มากที่สุดในแต่ละภูมิภาค</h2>
         <p class="note">ยอดขายสุทธิของทุกจังหวัดในภูมิภาค เรียงภูมิภาคจากยอดรวมมากไปน้อย แท่งในแต่ละการ์ดเทียบกับจังหวัดอันดับ 1 ของภูมิภาคนั้น</p>
       </section>
+      <${ProvinceMapCard} regions=${s.regions} />
       ${s.regions.length
         ? html`<section class="regions">${s.regions.map((r) => html`<${RegionCard} key=${r.region} r=${r} />`)}</section>`
         : html`<p class="empty">ไม่มีคำสั่งซื้อที่จัดส่งสำเร็จในตัวกรองนี้</p>`}
